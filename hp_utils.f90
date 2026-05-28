@@ -44,13 +44,15 @@ subroutine smoothing(nside, ord, lmax, map_in, fwhm)
 end subroutine smoothing
 
 ! Positions and values of the local extrema of an input map
-subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin)
+subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin, mask)
 	integer, intent(in)   :: nside
 	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
+	real(DP), intent(in), optional :: mask(0:12*nside**2-1,1)
 	integer, intent(out)  :: nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
 	integer               :: n, i, j, l, nlist
 	integer, allocatable  :: list(:)
 	real(DP)              :: rpix, radius, vi(3)
+	real(DP)              :: theta, phi, lat_deg, strip_bound
 	logical               :: use_disc
 	
 	n = nside2npix(nside) - 1
@@ -66,12 +68,20 @@ subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin)
 		! Finding local extrema using disk with given radius
 		!======================================================================================
 		rpix = sqrt(4.0*pi/(n+1)) / sqrt(2.0) ! Approximate radius of one pixel
-		radius = 5.0*rpix                     ! Disk radius
+		radius = 5.0*rpix                      ! Disk radius
 		l = (2.0*radius)**2 / (4.0*pi/(n+1))  ! Approximate number of pixels inside the disk
 		
 		allocate(list(0:l))
 		
 		do i = 0, n
+			! Skip pixels within strip around equator
+			call pix2ang_nest(nside, i, theta, phi)
+!			lat_deg = 90.0 - (theta * RAD2DEG)
+!			strip_bound = 2.5
+!			if (lat_deg > -strip_bound .and. lat_deg < strip_bound) cycle
+			
+			if (present(mask) .and. mask(i, 1) == 0.0) cycle
+
 			! Pixel indices of a neighborhood around pixel "i"
 			call pix2vec_nest(nside, i, vi)
 			call query_disc(nside, vi, radius, list, nlist, nest=1)
@@ -94,6 +104,14 @@ subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin)
 		allocate(list(8))
 		
 		do i = 0, n
+			! Skip pixels within ±15° latitude of the equator
+			call pix2ang_nest(nside, i, theta, phi)
+!			lat_deg = 90.0 - (theta * RAD2DEG)
+!			strip_bound = 2.5
+!			if (lat_deg > -strip_bound .and. lat_deg < strip_bound) cycle
+			
+			if (present(mask) .and. mask(i, 1) == 0.0) cycle
+			
 			! Pixel indices of a neighborhood around pixel "i"
 			call neighbours_nest(nside, i, list, nlist)
 			
@@ -218,7 +236,7 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	call pixel_window(wl, nside)
 	
 	! Gaussian beam for "stff=0"
-	if (stff == 0) call gaussbeam(fwhm, lmax, bl2)
+!	if (stff == 0) call gaussbeam(fwhm, lmax, bl2)
 	
 	write (*,'(/, X, "--- Computing interpolation matrix of dimension ", I0, ".")') next
 	
@@ -339,9 +357,12 @@ subroutine ss_interp_precomp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	do l = 1, lmax
 		bl1(l,1) = (-1.0)**(stff+1) / (dble(l)*dble(l+1) + dble(tens)) / (dble(l)*dble(l+1))**stff
 	end do
-
+	
 	! Pixel window function
 	call pixel_window(wl, nside)
+
+	! Gaussian beam for "stff=0"
+!	if (stff == 0) call gaussbeam(fwhm, lmax, bl2)
 
 	! Precompute effective beam
 	bl_eff(:,1) = wl(:,1) * bl1(:,1) * bl2(:,1)
@@ -357,10 +378,7 @@ subroutine ss_interp_precomp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	mfac0 = mfac_arr(0)
 	call gen_recfactor(lmax, 0, recfac)
 
-	! Gaussian beam for "stff=0"
-	if (stff == 0) call gaussbeam(fwhm, lmax, bl2)
-
-	write (*,'(/, X, "--- Computing interpolation matrix of dimension ", I0, ".")') next
+!	write (*,'(/, X, "--- Computing interpolation matrix of dimension ", I0, ".")') next
 
 	! Computing "A"
 	!$OMP PARALLEL PRIVATE(i, j) SHARED(A, vec, lmin, lmax, mfac0, recfac, wgt)
@@ -377,14 +395,14 @@ subroutine ss_interp_precomp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	! Computing "B"
 	B = LUT - lmin * sum(LUT)/next
 
-	write (*,'(X, A)') "--- Solving system of equations."
+!	write (*,'(X, A)') "--- Solving system of equations."
 
 	! Calculating and storing the interpolation coefficients "X=A^(-1)*B" in array "B"
 	call lsolve(next, A, B)
 
 	deallocate(A)
 	
-	write (*,'(X, A)') "--- Calculating spherical harmonic coefficients."
+!	write (*,'(X, A)') "--- Calculating spherical harmonic coefficients."
 	
 	allocate(alm(1,0:lmax,0:lmax), source=(0.0, 0.0))
 	
@@ -399,12 +417,12 @@ subroutine ss_interp_precomp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	! "a_00" takes a different value when "stff>0" or "tens=0"
 	if (lmin == 1) alm(1,0,0) = sqrt(4.0*pi) * sum(LUT) / next
 	
-	write (*,'(X, A)') "--- Generating map."
+!	write (*,'(X, A)') "--- Generating map."
 	
 	call alm2map(nside, lmax, lmax, alm, map_out) ! Generates map in RING ordering
 	call convert_ring2nest(nside, map_out)        ! Goes back to NESTED ordering
 
-	write (*,'(X, "--- Max. and min. interpolation error: ", E10.4, X, E10.4)') maxval(abs(LUT-map_out(iext))), minval(abs(LUT-map_out(iext)))
+!	write (*,'(X, "--- Max. and min. interpolation error: ", E10.4, X, E10.4)') maxval(abs(LUT-map_out(iext))), minval(abs(LUT-map_out(iext)))
 	
 	deallocate(B, wl, bl1, bl2, alm)
 	
@@ -482,8 +500,8 @@ subroutine emd(nside, map_in, nimf, stff, tens, lmax, imf)
 			! Stoppage criterion
 			if (j == 2) stop_crit = mean_stdv / 2.0
 			
-			write (*,'(/, X,          "-- Mean map standard deviation: SD = ", E10.4)') mean_stdv
-			if (j >= 2) write (*,'(X, "-- Stoppage criteria:           SD < ", E10.4)') stop_crit
+			write (*,'(/, X,          "-- Mean envelope SD = ", E10.4)') mean_stdv
+			if (j >= 2) write (*,'(X, "-- Stoppage criteria SD < ", E10.4)') stop_crit
 			
 			! Force the standard deviation to decrease, otherwise exit loop
 			if (j >= 2 .and. mean_stdv >= last_mean_stdv) exit
@@ -606,9 +624,10 @@ subroutine generate_directions(N_nu, ndir, dir)
 end subroutine generate_directions
 
 ! Multivariate Empirical Mode Decomposition (MEMD) process
-subroutine memd(nside, map_in, N_nu, nimf, stff, tens, lmax, ndir, imf)
+subroutine memd(nside, map_in, N_nu, nimf, stff, tens, lmax, ndir, imf, mask)
 	integer, intent(in)   :: nside, N_nu, nimf, stff, tens, lmax, ndir
 	real(DP), intent(in)  :: map_in(0:12*nside**2-1, N_nu)
+	real(DP), intent(in), optional :: mask(0:12*nside**2-1,1)
 	real(DP), intent(out) :: imf(0:12*nside**2-1, N_nu, nimf)
 	integer               :: i, j, k, d, n, nmax, nmin
 	integer               :: imax(12*nside**2/9), imin(12*nside**2/9)
@@ -660,7 +679,10 @@ subroutine memd(nside, map_in, N_nu, nimf, stff, tens, lmax, ndir, imf)
 				end do
 
 				! Find extrema of projected signal
-				call local_extrema(nside, proj, nmax, nmin, imax, imin)
+				call local_extrema(nside, proj, nmax, nmin, imax, imin, mask=mask)
+				
+				write(*,'(4X, "Number of local maxima = ", I0)') nmax
+				write(*,'(4X, "Number of local minima = ", I0)') nmin
 
 				! Envelopes in projected space
 				call ss_interp_precomp(nside, lmax, stff, tens, nmax, proj(imax(1:nmax)), imax(1:nmax), Emax)
@@ -684,7 +706,7 @@ subroutine memd(nside, map_in, N_nu, nimf, stff, tens, lmax, ndir, imf)
 
 			if (j == 2) stop_crit = mean_stdv / 2.0
 
-			write (*,'(X, "-- Mean envelope SD = ", E10.4)') mean_stdv
+			write (*,'(/, X, "-- Mean envelope SD = ", E10.4)') mean_stdv
 
 			if (j >= 2 .and. mean_stdv >= last_mean_stdv) exit
 

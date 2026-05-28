@@ -8,11 +8,13 @@ use hp_utils
 implicit none
 
 !======================================================================================
-real(DP), allocatable          :: map_in(:,:), map_out(:,:,:), freqmaps(:,:)
-real(DP)                       :: fwhm, bl_min, fwhm_rad
+real(DP), allocatable          :: map_in(:,:), map_out(:,:,:), freqmaps(:,:), mask_in(:,:), mask(:,:)
+real(DP)                       :: fwhm, bl_min, fwhm_rad, strip_bound
 integer                        :: nside, nside_in, npix, npix_in, nmaps, ord, ord_in, n
+integer                        :: nside_mask, npix_mask, nmaps_mask, ord_mask
 integer                        :: nimf, i, stff, tens, lmax, lcut
 integer                        :: nfreqmaps, ndir
+character(len=80)              :: fmask
 character(len=80), allocatable :: fout(:)
 !======================================================================================
 
@@ -25,7 +27,17 @@ write(*,'(/,X,A)',advance='no') "Enter resulution parameter (Nside): "
 read(*,*) nside
 
 ! Provide storage for frequency maps array
-allocate(freqmaps(0:12*nside**2-1,nfreqmaps))
+allocate(freqmaps(0:12*nside**2-1,nfreqmaps), mask(0:12*nside**2-1,1), source=0.0)
+
+! Store mask map in array "mask"
+!fmask = "COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits"
+fmask = "COM_Mask_CMB-Inpainting-Mask-Int_2048_R3.00.fits"
+npix_mask = getsize_fits(fmask, nmaps=nmaps_mask, nside=nside_mask, ordering=ord_mask)
+allocate(mask_in(0:12*nside_mask**2-1,1))
+call input_map(fmask, mask_in, npix_mask, 1)
+if (ord_mask == RING) call convert_ring2nest(nside_mask, mask_in(:,1))
+if (nside_mask == nside) mask = mask_in
+if (nside_mask /= nside) call udgrade_nest(mask_in(:,1), nside_mask, mask(:,1), nside)
 
 do i = 1, nfreqmaps
 	! Read input file name of frequency map
@@ -39,13 +51,19 @@ do i = 1, nfreqmaps
 	
 	! Change ordering to NEST
 	if (ord_in == RING) call convert_ring2nest(nside_in, map_in(:,1))
+	
+!	strip_bound = sin(2.5 * DEG2RAD)
+!	call apply_mask(map_in, NEST, zbounds=[strip_bound, -strip_bound])
 
 	! Change frequency maps resolution to the given resolution parameter
 	if (nside_in == nside) freqmaps(:,i) = map_in(:,1)
 	if (nside_in /= nside) call udgrade_nest(map_in(:,1), nside_in, freqmaps(:,i), nside)
-
+	
 	deallocate(map_in)
 end do
+
+! Mask all the frequency maos
+call apply_mask(freqmaps, NEST, mask=mask)
 
 ! Read number of intrinsic modes
 write(*,'(/,X,A)',advance='no') "Enter number of intrinsic modes: "
@@ -62,6 +80,10 @@ read(*,*) tens
 ! Read smoothing FWHM parameter
 write(*,'(/,X,A)',advance='no') "Enter smoothing FWHM parameter: "
 read(*,*) fwhm
+
+! Read smoothing FWHM parameter
+write(*,'(/,X,A)',advance='no') "Enter number of projections for the computation of the MEMD mean envelopes: "
+read(*,*) ndir
 
 ! Output file names
 allocate(fout(nimf+1))
@@ -82,16 +104,13 @@ do i = 1, nfreqmaps
 	call smoothing(nside, NEST, 3*nside-1, freqmaps(:,i), fwhm)
 end do
 
-! Number of projections for MEMD
-ndir = 50
-
 write (*,'(/,X,"Multivariate Empirical Mode Decomposition with ", I0, " directions.")') ndir
 
 ! Allocate arrays
 allocate(map_out(0:n,nfreqmaps,nimf), source=0.0)
 
 ! Perform MEMD
-call memd(nside, freqmaps, nfreqmaps, nimf, stff, tens, lmax, ndir, map_out)
+call memd(nside, freqmaps, nfreqmaps, nimf, stff, tens, lmax, ndir, map_out, mask=mask)
 
 write (*,'(/,X,A)') "Multivariate EMD completed successfully."
 
